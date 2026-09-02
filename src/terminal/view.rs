@@ -4144,30 +4144,39 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Walk older history, matching the prefix captured when navigation
+    /// started — zsh's `up-line-or-beginning-search`, which macOS users get
+    /// from ↑ and Ctrl+P. An empty prefix walks every entry.
     fn history_prev(&mut self, cx: &mut Context<Self>) {
         if self.history.is_empty() {
             return;
         }
-        let next = match self.history_nav {
+        let from = match self.history_nav {
             None => {
                 self.history_stash = self.cmd.text();
-                self.history.len() - 1
+                self.history.len()
             }
-            Some(0) => 0,
-            Some(i) => i - 1,
+            Some(i) => i,
         };
-        self.history_nav = Some(next);
-        self.cmd.set(&self.history[next]);
-        cx.notify();
+        if let Some(next) = (0..from)
+            .rev()
+            .find(|&i| self.history[i].starts_with(&self.history_stash))
+        {
+            self.history_nav = Some(next);
+            self.cmd.set(&self.history[next]);
+            cx.notify();
+        }
     }
 
     fn history_next(&mut self, cx: &mut Context<Self>) {
         let Some(i) = self.history_nav else {
             return;
         };
-        if i + 1 < self.history.len() {
-            self.history_nav = Some(i + 1);
-            self.cmd.set(&self.history[i + 1]);
+        if let Some(next) =
+            (i + 1..self.history.len()).find(|&j| self.history[j].starts_with(&self.history_stash))
+        {
+            self.history_nav = Some(next);
+            self.cmd.set(&self.history[next]);
         } else {
             self.history_nav = None;
             let stash = std::mem::take(&mut self.history_stash);
@@ -11743,6 +11752,41 @@ mod gpui_tests {
                 assert_eq!(view.cmd.text(), "echo hello");
                 view.handle_editor_key(&key("ctrl-n"), cx);
                 assert_eq!(view.cmd.text(), "");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn up_and_ctrl_p_recall_the_last_command_matching_the_typed_prefix(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.history = ["git status", "echo hello", "git log", "ls"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+                view.cmd.set("git");
+
+                view.handle_editor_key(&key("up"), cx);
+                assert_eq!(
+                    view.cmd.text(),
+                    "git log",
+                    "↑ skips ls and echo hello, which do not start with git"
+                );
+                view.handle_editor_key(&key("up"), cx);
+                assert_eq!(view.cmd.text(), "git status");
+                view.handle_editor_key(&key("down"), cx);
+                assert_eq!(view.cmd.text(), "git log");
+                view.handle_editor_key(&key("down"), cx);
+                assert_eq!(
+                    view.cmd.text(),
+                    "git",
+                    "↓ past the newest match restores the prefix"
+                );
+
+                view.cmd.set("echo");
+                view.handle_editor_key(&key("ctrl-p"), cx);
+                assert_eq!(view.cmd.text(), "echo hello");
             })
             .unwrap();
     }
