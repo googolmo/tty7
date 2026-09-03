@@ -760,6 +760,88 @@ mod tests {
     }
 
     #[test]
+    fn stamp_missing_fills_blanks_and_leaves_real_timestamps_alone() {
+        let mut raw = vec![
+            Raw {
+                cmd: "bash line".into(),
+                cwd: None,
+                ts: None,
+                exit: None,
+            },
+            Raw {
+                cmd: "zsh line".into(),
+                cwd: None,
+                ts: Some(100),
+                exit: None,
+            },
+        ];
+        stamp_missing(&mut raw, Some(500));
+        assert_eq!(raw[0].ts, Some(500), "a bash line borrows the file mtime");
+        assert_eq!(
+            raw[1].ts,
+            Some(100),
+            "a line that knows its own time keeps it"
+        );
+
+        // An unreadable mtime must not wipe what is already there.
+        let mut blank = vec![Raw {
+            cmd: "no time".into(),
+            cwd: None,
+            ts: None,
+            exit: None,
+        }];
+        stamp_missing(&mut blank, None);
+        assert_eq!(blank[0].ts, None);
+    }
+
+    #[test]
+    fn file_mtime_secs_reads_a_real_file_and_gives_up_on_a_missing_one() {
+        let dir = std::env::temp_dir().join(format!("tty7-hist-mtime-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history");
+        std::fs::write(&path, b"echo hi\n").unwrap();
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let ts = file_mtime_secs(&path).expect("a file just written has an mtime");
+        assert!(ts.abs_diff(now) < 60, "mtime {ts} should sit near {now}");
+        assert_eq!(file_mtime_secs(&dir.join("absent")), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_borrowed_mtime_slots_untimestamped_entries_into_the_timeline() {
+        // Without a borrowed mtime these sort as the oldest thing there is and
+        // â can never walk back to them; with it the block lands where the
+        // file was last written.
+        let mut raw = vec![Raw {
+            cmd: "bash cmd".into(),
+            cwd: None,
+            ts: None,
+            exit: None,
+        }];
+        stamp_missing(&mut raw, Some(150));
+        raw.push(Raw {
+            cmd: "old zsh".into(),
+            cwd: None,
+            ts: Some(100),
+            exit: None,
+        });
+        raw.push(Raw {
+            cmd: "new zsh".into(),
+            cwd: None,
+            ts: Some(200),
+            exit: None,
+        });
+
+        let h = normalize(raw);
+        assert_eq!(h.entries, ["old zsh", "bash cmd", "new zsh"]);
+    }
+
+    #[test]
     fn normalize_dedups_keeping_latest_and_drops_blanks() {
         let raw = vec![
             pair("ls", None),

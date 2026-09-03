@@ -351,6 +351,7 @@ pub struct TerminalView {
     ranked_cwd: Option<std::path::PathBuf>,
     history_nav: Option<usize>,
     history_stash: String,
+    history_prefix: String,
     last_word_nav: Option<LastWordWalk>,
     pending_history: Option<PendingHistory>,
     completion: Option<CompletionSession>,
@@ -1403,6 +1404,7 @@ impl TerminalView {
             ranked_cwd: None,
             history_nav: None,
             history_stash: String::new(),
+            history_prefix: String::new(),
             last_word_nav: None,
             pending_history: None,
             completion: None,
@@ -4083,6 +4085,7 @@ impl TerminalView {
         }
         self.history_nav = None;
         self.history_stash.clear();
+        self.history_prefix.clear();
         self.close_completion();
 
         self.wipe_pending_typeahead();
@@ -4146,21 +4149,23 @@ impl TerminalView {
 
     /// Walk older history, matching the prefix captured when navigation
     /// started — zsh's `up-line-or-beginning-search`, which macOS users get
-    /// from ↑ and Ctrl+P. An empty prefix walks every entry.
+    /// from ↑ and Ctrl+P. The prefix is the text left of the cursor, so
+    /// Ctrl+A then ↑ walks every entry; the whole line is stashed separately
+    /// because ↓ past the newest match has to restore what was typed, cursor
+    /// tail included.
     fn history_prev(&mut self, cx: &mut Context<Self>) {
-        if self.history.is_empty() {
-            return;
-        }
         let from = match self.history_nav {
             None => {
-                self.history_stash = self.cmd.text();
+                let line = self.cmd.text();
+                self.history_prefix = line[..self.cmd.cursor_byte()].to_string();
+                self.history_stash = line;
                 self.history.len()
             }
             Some(i) => i,
         };
         if let Some(next) = (0..from)
             .rev()
-            .find(|&i| self.history[i].starts_with(&self.history_stash))
+            .find(|&i| self.history[i].starts_with(&self.history_prefix))
         {
             self.history_nav = Some(next);
             self.cmd.set(&self.history[next]);
@@ -4173,12 +4178,13 @@ impl TerminalView {
             return;
         };
         if let Some(next) =
-            (i + 1..self.history.len()).find(|&j| self.history[j].starts_with(&self.history_stash))
+            (i + 1..self.history.len()).find(|&j| self.history[j].starts_with(&self.history_prefix))
         {
             self.history_nav = Some(next);
             self.cmd.set(&self.history[next]);
         } else {
             self.history_nav = None;
+            self.history_prefix.clear();
             let stash = std::mem::take(&mut self.history_stash);
             self.cmd.set(&stash);
         }
@@ -11787,6 +11793,40 @@ mod gpui_tests {
                 view.cmd.set("echo");
                 view.handle_editor_key(&key("ctrl-p"), cx);
                 assert_eq!(view.cmd.text(), "echo hello");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn history_search_takes_its_prefix_from_the_text_left_of_the_cursor(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.history = ["git status", "echo hello", "git log", "ls"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+
+                // Ctrl+A parks the cursor at the start. Nothing sits left of
+                // it, so UP walks the whole list instead of filtering on a line
+                // the user is about to edit in front of.
+                view.cmd.set_with_cursor("git", 0);
+                view.handle_editor_key(&key("up"), cx);
+                assert_eq!(view.cmd.text(), "ls", "an empty prefix filters nothing");
+
+                // A cursor parked mid-line searches on what is behind it, and
+                // DOWN past the newest match restores the whole line, the part
+                // right of the cursor included.
+                view.history_nav = None;
+                view.cmd.set_with_cursor("git hello", 4);
+                view.handle_editor_key(&key("up"), cx);
+                assert_eq!(
+                    view.cmd.text(),
+                    "git log",
+                    "the prefix is `git `, not the whole `git hello`"
+                );
+                view.handle_editor_key(&key("down"), cx);
+                assert_eq!(view.cmd.text(), "git hello");
             })
             .unwrap();
     }
